@@ -3,10 +3,10 @@ from sys import version_info, stdout
 import argparse
 import random
 from itertools import product
-from caringcaribou.utils.can_actions import CanActions
+from caringcaribou.utils.can_actions import CanActions, parse_dbc
 from caringcaribou.utils.common import hex_str_to_nibble_list, int_from_byte_list, list_to_hex_str, parse_int_dec_or_hex
 from caringcaribou.utils.constants import ARBITRATION_ID_MAX, ARBITRATION_ID_MIN, BYTE_MAX, BYTE_MIN
-from time import sleep
+from time import sleep, time
 
 
 # Python 2/3 compatibility
@@ -38,7 +38,7 @@ def directive_str(arb_id, data):
     return directive
 
 
-def write_directive_to_file_handle(file_handle, arb_id, data):
+def write_directive_to_file_handle(file_handle, arb_id, data, print_msg):
     """
     Writes a cansend directive to a file
 
@@ -47,7 +47,7 @@ def write_directive_to_file_handle(file_handle, arb_id, data):
     :param data: list of data bytes
     """
     directive = directive_str(arb_id, data)
-    file_handle.write("{0}\n".format(directive))
+    file_handle.write("{0}: {1}\n".format(print_msg, directive))
 
 
 def set_seed(seed=None):
@@ -410,7 +410,7 @@ def bruteforce_fuzz(arb_id, initial_data, data_bitmap, filename=None, start_inde
 
 
 def mutate_fuzz(initial_arb_id, initial_data, arb_id_bitmap, data_bitmap, filename=None, start_index=0,
-                show_status=True, show_responses=False, seed=None):
+                show_status=True, show_responses=False, seed=None, blacklist=None):
     """
     Performs mutation based fuzzing of selected nibbles of a given arbitration ID and data.
     Nibble selection is controlled by bool lists 'arb_id_bitmap' and 'data_bitmap'.
@@ -433,6 +433,10 @@ def mutate_fuzz(initial_arb_id, initial_data, arb_id_bitmap, data_bitmap, filena
     set_seed(seed)
 
     def response_handler(msg):
+        # Ignore blacklisted arbitration IDs
+        if msg.arbitration_id in blacklist:
+            return
+
         # Callback handler for printing incoming messages
         if msg.arbitration_id != arb_id or list(msg.data) != data:
             response_directive = directive_str(msg.arbitration_id, msg.data)
@@ -489,6 +493,134 @@ def mutate_fuzz(initial_arb_id, initial_data, arb_id_bitmap, data_bitmap, filena
                     write_directive_to_file_handle(output_file, arb_id, data)
                 sleep(DELAY_BETWEEN_MESSAGES)
                 current_index += 1
+    finally:
+        if output_file is not None:
+            output_file.close()
+
+
+def dbc_fuzz(num=1000, dbc_file=None, log_file=None, blacklist=None, arbids=None):
+    """
+    TODO: add log parsing and smarter logic
+            cleanup
+    """
+
+    #FILTER_MSGS = []
+    arb_id = None
+    data = None
+    file_logging_enabled = log_file is not None
+    output_file = None
+    arb_id_counter = 0
+
+    # Define a callback function which will handle incoming messages
+    def response_handler(msg):
+        """
+        # Collect filtered messages
+        if filter:
+            print(msg)
+            if msg.arbitration_id not in FILTER_MSGS:
+                print("adding filtered msg to list")
+                FILTER_MSGS.append(msg.arbitration_id)
+            return
+
+        # Skip filtered messages
+        if msg.arbitration_id in FILTER_MSGS:
+            #print("is it in filtered msg list")
+            return
+        """
+
+        # Ignore blacklisted arbitration IDs
+        if msg.arbitration_id in blacklist:
+            return
+
+        if msg.arbitration_id != arb_id or list(msg.data) != data:
+            directive = directive_str(arb_id, data)
+            print("\rSent message: {0} ".format(directive))
+            #print("  Received message: {0}".format(msg))
+            print("Received message: {0}#{1}".format(msg.arbitration_id, bytes(msg.data).hex()))
+            if file_logging_enabled:
+                write_directive_to_file_handle(output_file, arb_id, data, "sent")
+                write_directive_to_file_handle(output_file, msg.arbitration_id, msg.data, "recv")
+
+    """
+    # Collect repeating messages
+    if filter:
+        with CanActions() as can:
+            can.add_listener(response_handler)
+            t_end = time() + 60 # 60 seconds
+            print("Collecting repeating messages on the CAN Bus for 60 seconds...")
+            while time() < t_end:
+                # wait for 60 seconds to collect the messages
+                continue
+            can.clear_listeners()
+        filter = False
+    """
+
+    # Parse DBC file
+    if dbc_file is not None:
+        ARB_IDS = parse_dbc(dbc_file)
+        print("Found {0} messages (arbitration ids) from dbc file!".format(len(ARB_IDS)))
+
+    if arbids is not None:
+        ARB_IDS = arbids
+
+    #ARB_IDS = [1970, 1971, 298, 121, 122, 123, 124, 125, 126, 129]
+
+    try:
+        if file_logging_enabled:
+            output_file = open(log_file, "a")
+        with CanActions() as can_wrap:
+            # Register callback handler for incoming messages
+            messages_sent = 0
+            can_wrap.add_listener(response_handler)
+
+            # Fuzzing logic
+            while True:
+                if dbc_file is not None:
+                    # Use arbitration IDs from DBC file
+                    arb_id = ARB_IDS[arb_id_counter]
+
+                    # Check if we exausted all arb ids from dbc, if so reset the cunter
+                    if arb_id_counter == len(ARB_IDS)-1:
+                        arb_id_counter = 0
+
+                        # TODO: REMOVE
+                        break
+
+                    # Every Nth sent message change the arbitration ID
+                    if messages_sent % num == 0:
+                        arb_id_counter += 1
+                else:
+                    # Use a random arbitration ID
+                    #arb_id = get_random_arbitration_id(ARBITRATION_ID_MIN, ARBITRATION_ID_MAX)
+
+                    if arb_id_counter > len(ARB_IDS)-1:
+                        break
+                    arb_id = ARB_IDS[arb_id_counter]
+
+
+
+                # Set data
+                data = get_random_data(MIN_DATA_LENGTH, MAX_DATA_LENGTH)
+
+                print("\rMessages sent: {0} Sending message: {1}".format(messages_sent, directive_str(arb_id, data)), end="")
+                stdout.flush()
+
+                # Send message
+                can_wrap.send(data=data, arb_id=arb_id)
+
+                messages_sent += 1
+
+                # Every Nth sent message change the arbitration ID
+                if messages_sent % num == 0:
+                    arb_id_counter += 1
+
+                # Log to file
+                #if file_logging_enabled:
+                #    write_directive_to_file_handle(output_file, arb_id, data)
+                sleep(DELAY_BETWEEN_MESSAGES)
+
+    except IOError as e:
+        print("ERROR: {0}".format(e))
     finally:
         if output_file is not None:
             output_file.close()
@@ -672,7 +804,12 @@ def __handle_mutate(args):
 
     mutate_fuzz(initial_arb_id=arb_id, initial_data=data, arb_id_bitmap=id_bitmap,
                 data_bitmap=data_bitmap, filename=args.file, start_index=args.index,
-                show_responses=args.responses, seed=args.seed)
+                show_responses=args.responses, seed=args.seed, blacklist=set(args.blacklist))
+    
+
+def __handle_dbc(args):
+    dbc_fuzz(num=args.n, dbc_file=args.dbc, log_file=args.file,
+                blacklist=set(args.blacklist), arbids=set(args.arbids))
 
 
 def __handle_replay(args):
@@ -712,6 +849,7 @@ def parse_args(args):
 ./cc.py fuzzer random -min 4 -seed 0xabc123 -f log.txt
 ./cc.py fuzzer brute 0x123 12ab..78
 ./cc.py fuzzer mutate 7f.. 12ab....
+./cc.py fuzzer dbc -dbc my_dbc.dbc -n 100000 -f log_file.log -delay 0.02
 ./cc.py fuzzer replay log.txt
 ./cc.py fuzzer identify log.txt""")
     subparsers = parser.add_subparsers(dest="module_function")
@@ -752,9 +890,39 @@ def parse_args(args):
     cmd_mutate.add_argument("-seed", "-s", metavar="S", type=parse_int_dec_or_hex, default=None, help="set random seed")
     cmd_mutate.add_argument("-index", "-i", metavar="I", type=parse_int_dec_or_hex, default=0,
                             help="start index (for resuming previous session)")
+    cmd_mutate.add_argument("-blacklist", metavar="B", type=parse_int_dec_or_hex, default=[], nargs="+",
+                             help="arbitration IDs to ignore")
     cmd_mutate.add_argument("-delay", type=float, metavar="D", default=DELAY_BETWEEN_MESSAGES,
                             help="delay between messages")
     cmd_mutate.set_defaults(func=__handle_mutate)
+
+    # DBC fuzzer
+    cmd_dbc = subparsers.add_parser("dbc", help="Parses a CAN DBC file, collects all arbitration IDs and sends random data with those arb ids")
+    cmd_dbc.add_argument("-n", type=int, default=1000, help="how many messages to send for each arb id")
+    #cmd_dbc.add_argument("-check", "-c", metavar="C", type=parse_int_dec_or_hex, default=10, help="check legit message response every nth message")
+    cmd_dbc.add_argument("-dbc", "-d", default=None, help="dbc file to parse arbitration ids")
+    cmd_dbc.add_argument("-file", "-f", default=None, help="log file")
+    cmd_dbc.add_argument("-blacklist", metavar="B", type=parse_int_dec_or_hex, default=[], nargs="+",
+                             help="arbitration IDs to ignore while recv")
+    cmd_dbc.add_argument("-arbids", metavar="A", type=parse_int_dec_or_hex, default=[], nargs="+",
+                             help="arbitration IDs to iterate through")
+    #cmd_dbc.add_argument("-filter", action="store_true", help="filter out repeating messages in case the ECU sends them constantly before we begin")
+    cmd_dbc.add_argument("-delay", type=float, metavar="D", default=DELAY_BETWEEN_MESSAGES,
+                            help="delay between messages")
+    cmd_dbc.set_defaults(func=__handle_dbc)
+
+    """
+    cmd_smart.add_argument("arb_id", help="hex arbitration ID where dots mark indices to mutate, e.g. 7f..")
+    cmd_smart.add_argument("data", help="hex data where dots mark indices to mutate, e.g. 123.AB..")
+    cmd_smart.add_argument("-responses", "-r", action="store_true", help="print responses to stdout")
+    cmd_smart.add_argument("-file", "-f", default=None, help="log file")
+    cmd_smart.add_argument("-check", "-c", metavar="C", type=parse_int_dec_or_hex, default=10, help="check legit message response every nth message")
+    cmd_smart.add_argument("-index", "-i", metavar="I", type=parse_int_dec_or_hex, default=0,
+                            help="start index (for resuming previous session)")
+    cmd_smart.add_argument("-delay", type=float, metavar="D", default=DELAY_BETWEEN_MESSAGES,
+                            help="delay between messages")
+    """
+    
 
     # Replay
     cmd_replay = subparsers.add_parser("replay", help="Replay a previously recorded directive file")

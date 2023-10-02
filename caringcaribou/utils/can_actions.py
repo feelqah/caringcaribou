@@ -2,6 +2,7 @@ from __future__ import print_function
 from caringcaribou.utils.constants import ARBITRATION_ID_MAX, ARBITRATION_ID_MAX_EXTENDED, ARBITRATION_ID_MIN, BYTE_MAX, BYTE_MIN
 from sys import stdout, version_info
 import can
+import cantools
 import time
 
 # Handle large ranges efficiently in both python 2 and 3
@@ -17,6 +18,17 @@ NOTIFIER_STOP_DURATION = 0.5
 # The value None corresponds to the default CAN interface (typically can0)
 DEFAULT_INTERFACE = None
 
+def parse_dbc(dbc_file):
+    """ Parses the CAN DBC file
+    """
+    db = cantools.database.load_file(dbc_file)
+
+    ARB_IDS = []
+
+    for msg in db.messages:
+        ARB_IDS.append(msg.frame_id)
+
+    return ARB_IDS
 
 def auto_blacklist(bus, duration, classifier_function, print_results):
     """Listens for false positives on the CAN bus and generates an arbitration ID blacklist.
